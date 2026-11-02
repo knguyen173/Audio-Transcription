@@ -1,0 +1,112 @@
+import os
+import pandas as pd
+import yt_dlp
+import stable_whisper
+from pydub import AudioSegment
+
+def process_presidential_speech_from_csv(youtube_url, csv_path):
+    results_dir = 'results'
+    os.makedirs(results_dir, exist_ok=True)
+    
+    print("1. Parsing unique sentences from CSV...")
+    # Read CSV without headers. Based on your file, sentences are in the second column (index 1)
+    df = pd.read_csv(csv_path, header=None)
+    
+    # Extract unique sentences while preserving their order
+    sentences = df[1].dropna().unique().tolist()
+    
+    # Join into a single string to bypass the stable-whisper TypeError bug
+    full_text = " ".join(sentences)
+    print(f"-> Extracted {len(sentences)} unique sentences from the CSV.")
+
+    print("\n2. Downloading audio from YouTube...")
+    audio_filename = os.path.join(results_dir, 'full_speech.wav')
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'wav',
+        }],
+        'outtmpl': os.path.join(results_dir, 'full_speech.%(ext)s'),
+        'quiet': True
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([youtube_url])
+    print(f"-> Audio downloaded to {audio_filename}")
+
+    print("\n3. Aligning text to audio (This may take a minute)...")
+    model = stable_whisper.load_model('base')
+    
+    # Align the full text block to the audio
+    result = model.align(audio_filename, full_text, language='en')
+
+    print("\n4. Grouping timestamps to CSV sentences and slicing audio...")
+    audio = AudioSegment.from_wav(audio_filename)
+    audio_dir = os.path.join(results_dir, 'audio_slices')
+    os.makedirs(audio_dir, exist_ok=True)
+    
+    # Flatten all words from the aligned segments
+    aligned_words = []
+    for segment in result.segments:
+        aligned_words.extend(segment.words)
+        
+    word_idx = 0
+    total_words = len(aligned_words)
+    sentences_data = []
+
+    # Iterate through our target sentences and group the word-level timestamps
+    for i, sentence in enumerate(sentences):
+        # We compare character length ignoring spaces/punctuation spacing
+        sentence_no_spaces = sentence.replace(" ", "").replace("\u200b", "")
+        current_matched_text = ""
+        
+        start_ms = None
+        end_ms = None
+        
+        # Accumulate words until we match the sentence length
+        while word_idx < total_words:
+            w = aligned_words[word_idx]
+            w_text = getattr(w, 'word', getattr(w, 'text', '')) # Handle different stable-whisper versions
+            
+            if start_ms is None:
+                start_ms = int(w.start * 1000)
+            end_ms = int(w.end * 1000)
+            
+            current_matched_text += w_text.replace(" ", "")
+            word_idx += 1
+            
+            # If our accumulated text length matches or exceeds the target sentence length, cut it here
+            if len(current_matched_text) >= len(sentence_no_spaces):
+                break
+                
+        # Safeguard if timestamps were entirely missed
+        if start_ms is None:
+            start_ms, end_ms = 0, 0
+
+        # Slice the audio and export
+        audio_slice = audio[start_ms:end_ms]
+        slice_filename = os.path.join(audio_dir, f"sentence_{i+1}.wav")
+        audio_slice.export(slice_filename, format="wav")
+        
+        # Keep track of the organized data
+        sentences_data.append({
+            'Segment_ID': i + 1,
+            'Sentence_Text': sentence,
+            'Start_Time_ms': start_ms,
+            'End_Time_ms': end_ms
+        })
+        
+    # Export a cleaned up CSV mapping the exact slices
+    out_df = pd.DataFrame(sentences_data)
+    csv_out_path = os.path.join(results_dir, 'cleaned_speech_sentences.csv')
+    out_df.to_csv(csv_out_path, index=False)
+    
+    print(f"-> Success! Extracted {len(sentences_data)} audio slices.")
+    print(f"-> Your CSV and slices are saved in the '{results_dir}' directory.")
+
+# --- Execution ---
+if __name__ == "__main__":
+    YOUTUBE_LINK = "https://www.youtube.com/watch?v=ejZW9v4a9YQ" # Change to desired speech, Currently Carter's Inaugural Address
+    CSV_FILE = "Carter Inagural Speech - Sheet1.csv"
+    
+    process_presidential_speech_from_csv(YOUTUBE_LINK, CSV_FILE)
