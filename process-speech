@@ -4,20 +4,14 @@ import yt_dlp
 import stable_whisper
 from pydub import AudioSegment
 
-def process_presidential_speech_from_csv(youtube_url, csv_path):
-    results_dir = 'results'
+def process_and_clean_speech(youtube_url, transcript_path):
+    results_dir = 'attempts'
     os.makedirs(results_dir, exist_ok=True)
     
-    print("1. Parsing unique sentences from CSV...")
-    # Read CSV without headers. Based on your file, sentences are in the second column (index 1)
-    df = pd.read_csv(csv_path, header=None)
-    
-    # Extract unique sentences while preserving their order
-    sentences = df[1].dropna().unique().tolist()
-    
-    # Join into a single string to bypass the stable-whisper TypeError bug
-    full_text = " ".join(sentences)
-    print(f"-> Extracted {len(sentences)} unique sentences from the CSV.")
+    print("1. Parsing transcript...")
+    with open(transcript_path, 'r', encoding='utf-8') as f:
+        # Load as single block to prevent tokenizer crashes
+        text = f.read().replace('\n', ' ').strip()
 
     print("\n2. Downloading audio from YouTube...")
     audio_filename = os.path.join(results_dir, 'full_speech.wav')
@@ -34,79 +28,65 @@ def process_presidential_speech_from_csv(youtube_url, csv_path):
         ydl.download([youtube_url])
     print(f"-> Audio downloaded to {audio_filename}")
 
-    print("\n3. Aligning text to audio (This may take a minute)...")
+    print("\n3. Aligning text to audio and filtering non-speech...")
     model = stable_whisper.load_model('base')
     
-    # Align the full text block to the audio
-    result = model.align(audio_filename, full_text, language='en')
+    # vad=True enables Silero Voice Activity Detection to actively ignore 
+    # silence, applause, and non-vocal audio during alignment
+    result = model.align(audio_filename, text, language='en', vad=True)
+    
+    # Split specifically at sentence-ending punctuation
+    result.split_by_punctuation(['.', '!', '?'])
 
-    print("\n4. Grouping timestamps to CSV sentences and slicing audio...")
+    print("\n4. Generating CSV and slicing clean audio...")
     audio = AudioSegment.from_wav(audio_filename)
-    audio_dir = os.path.join(results_dir, 'audio_slices')
+    audio_dir = os.path.join(results_dir, 'clean_audio_slices')
     os.makedirs(audio_dir, exist_ok=True)
     
-    # Flatten all words from the aligned segments
-    aligned_words = []
-    for segment in result.segments:
-        aligned_words.extend(segment.words)
-        
-    word_idx = 0
-    total_words = len(aligned_words)
     sentences_data = []
 
-    # Iterate through our target sentences and group the word-level timestamps
-    for i, sentence in enumerate(sentences):
-        # We compare character length ignoring spaces/punctuation spacing
-        sentence_no_spaces = sentence.replace(" ", "").replace("\u200b", "")
-        current_matched_text = ""
+    for i, segment in enumerate(result.segments):
+        # Skip if the segment somehow contains no recognized words
+        if not getattr(segment, 'words', []):
+            continue
+            
+        sentence_text = segment.text.strip()
         
-        start_ms = None
-        end_ms = None
+        # KEY CHANGE: Target exact word boundaries to skip applause
+        # Start at the exact millisecond the first word is spoken
+        start_ms = int(segment.words[0].start * 1000)
+        # End at the exact millisecond the last word finishes
+        end_ms = int(segment.words[-1].end * 1000)
         
-        # Accumulate words until we match the sentence length
-        while word_idx < total_words:
-            w = aligned_words[word_idx]
-            w_text = getattr(w, 'word', getattr(w, 'text', '')) # Handle different stable-whisper versions
-            
-            if start_ms is None:
-                start_ms = int(w.start * 1000)
-            end_ms = int(w.end * 1000)
-            
-            current_matched_text += w_text.replace(" ", "")
-            word_idx += 1
-            
-            # If our accumulated text length matches or exceeds the target sentence length, cut it here
-            if len(current_matched_text) >= len(sentence_no_spaces):
-                break
-                
-        # Safeguard if timestamps were entirely missed
-        if start_ms is None:
-            start_ms, end_ms = 0, 0
-
-        # Slice the audio and export
         audio_slice = audio[start_ms:end_ms]
+        
         slice_filename = os.path.join(audio_dir, f"sentence_{i+1}.wav")
         audio_slice.export(slice_filename, format="wav")
         
-        # Keep track of the organized data
         sentences_data.append({
             'Segment_ID': i + 1,
-            'Sentence_Text': sentence,
+            'Sentence_Text': sentence_text,
             'Start_Time_ms': start_ms,
             'End_Time_ms': end_ms
         })
         
-    # Export a cleaned up CSV mapping the exact slices
-    out_df = pd.DataFrame(sentences_data)
-    csv_out_path = os.path.join(results_dir, 'cleaned_speech_sentences.csv')
-    out_df.to_csv(csv_out_path, index=False)
+    df = pd.DataFrame(sentences_data)
+    csv_path = os.path.join(results_dir, 'clean_speech_sentences.csv')
+    df.to_csv(csv_path, index=False)
     
-    print(f"-> Success! Extracted {len(sentences_data)} audio slices.")
-    print(f"-> Your CSV and slices are saved in the '{results_dir}' directory.")
+    print(f"-> Success! {len(sentences_data)} cleaned slices saved in '{audio_dir}'.")
 
 # --- Execution ---
 if __name__ == "__main__":
-    YOUTUBE_LINK = "https://www.youtube.com/watch?v=G8jV_1G9Yj4" # Change to desired speech, Currently Reagan's 2nd Inaugural Address
-    CSV_FILE = "Reagan_Inaugural_Transcript.csv"
+    # Prompt the user for the YouTube link in the terminal
+    YOUTUBE_LINK = input("Please paste the YouTube link here and press Enter: ").strip()
     
-    process_presidential_speech_from_csv(YOUTUBE_LINK, CSV_FILE)
+    # Prompt for the transcript file (defaults to transcript.txt if left blank)
+    TRANSCRIPT_FILE = input("Enter transcript filename (or press Enter to default to 'transcript.txt'): ").strip()
+    if not TRANSCRIPT_FILE:
+        TRANSCRIPT_FILE = "transcript.txt"
+    
+    if not YOUTUBE_LINK:
+        print("Error: No YouTube link provided. Exiting.")
+    else:
+        process_and_clean_speech(YOUTUBE_LINK, TRANSCRIPT_FILE)
