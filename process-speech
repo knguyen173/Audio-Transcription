@@ -106,7 +106,7 @@ def process_presidential_speech_from_csv(youtube_url, csv_path):
 
 # --- Execution ---
 if __name__ == "__main__":
-    YOUTUBE_LINK = "https://www.youtube.com/watch?v=ejZW9v4a9YQ" # Change to desired speech, Currently Carter's Inaugural Address
-    CSV_FILE = "Carter Inagural Speech - Sheet1.csv"
+    YOUTUBE_LINK = "https://www.youtube.com/watch?v=G8jV_1G9Yj4" # Change to desired speech, Currently Reagan's 2nd Inaugural Address
+    CSV_FILE = "Reagan_Inaugural_Transcript.csv"
     
     process_presidential_speech_from_csv(YOUTUBE_LINK, CSV_FILE)
